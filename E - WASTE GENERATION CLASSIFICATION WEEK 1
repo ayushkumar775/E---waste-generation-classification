@@ -1,1 +1,207 @@
+import os
+import cv2
+import numpy as np
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+import matplotlib.pyplot as plt
 
+# 設定參數
+DATASET_DIR = '/kaggle/input/garbage/photos'  # 資料夾路徑，請自行修改
+IMG_SIZE = (128, 128)
+BATCH_SIZE = 32
+EPOCHS = 40
+# 圖片預處理：自適應二值化
+def adaptive_threshold(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    bin_img = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 11, 2)
+    return cv2.cvtColor(bin_img, cv2.COLOR_GRAY2BGR)
+
+# 圖片預處理：尖銳化
+def sharpen(img):
+    kernel = np.array([[0, -1, 0],
+                       [-1, 5,-1],
+                       [0, -1, 0]])
+    sharp_img = cv2.filter2D(img, -1, kernel)
+    return sharp_img
+
+# 自訂生成器：將圖片做預處理
+class CustomDataGenerator(ImageDataGenerator):
+    def __init__(self, preprocess_func, **kwargs):
+        super().__init__(**kwargs)
+        self.preprocess_func = preprocess_func
+
+    def flow_from_directory(self, directory, **kwargs):
+        # 回傳 DirectoryIterator
+        return super().flow_from_directory(
+            directory,
+            target_size=IMG_SIZE,
+            batch_size=BATCH_SIZE,
+            class_mode='categorical',
+            **kwargs
+        )
+
+def preprocess_batch(batch_x, preprocess_func):
+    batch_x = np.array([preprocess_func((img * 255).astype(np.uint8)) for img in batch_x])
+    batch_x = batch_x / 255.0
+    return batch_x
+
+# 建立簡單CNN模型
+def build_model(num_classes):
+    model = Sequential([
+        Conv2D(32, (3,3), activation='relu', input_shape=(*IMG_SIZE, 3)),
+        MaxPooling2D(2,2),
+        Conv2D(64, (3,3), activation='relu'),
+        MaxPooling2D(2,2),
+        Flatten(),
+        Dense(128, activation='relu'),
+        Dropout(0.5),
+        Dense(num_classes, activation='softmax')
+    ])
+    model.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# 取得分類數量
+num_classes = len(next(os.walk(DATASET_DIR))[1])
+
+# 建立訓練與測試資料生成器（80%訓練，20%測試）
+datagen_bin = CustomDataGenerator(preprocess_func=adaptive_threshold, rescale=1./255, validation_split=0.2)
+datagen_sharp = CustomDataGenerator(preprocess_func=sharpen, rescale=1./255, validation_split=0.2)
+
+train_gen_bin = datagen_bin.flow_from_directory(DATASET_DIR, subset='training', shuffle=True)
+test_gen_bin = datagen_bin.flow_from_directory(DATASET_DIR, subset='validation', shuffle=False)
+
+train_gen_sharp = datagen_sharp.flow_from_directory(DATASET_DIR, subset='training', shuffle=True)
+test_gen_sharp = datagen_sharp.flow_from_directory(DATASET_DIR, subset='validation', shuffle=False)
+
+# 計算 steps
+steps_train_bin = train_gen_bin.samples // BATCH_SIZE
+steps_test_bin = test_gen_bin.samples // BATCH_SIZE
+steps_train_sharp = train_gen_sharp.samples // BATCH_SIZE
+steps_test_sharp = test_gen_sharp.samples // BATCH_SIZE
+
+# 建立兩個模型
+model_bin = build_model(num_classes)
+model_sharp = build_model(num_classes)
+
+# 新增紀錄 loss 和 accuracy 的 list
+train_loss_bin, val_loss_bin = [], []
+train_acc_bin, val_acc_bin = [], []
+train_loss_sharp, val_loss_sharp = [], []
+train_acc_sharp, val_acc_sharp = [], []
+
+# 訓練二值化分類器
+for epoch in range(EPOCHS):
+    print(f"Epoch {epoch+1}/{EPOCHS} (Binary)")
+    epoch_train_loss = []
+    epoch_train_acc = []
+    for step in range(steps_train_bin):
+        batch_x, batch_y = next(train_gen_bin)
+        batch_x = preprocess_batch(batch_x, adaptive_threshold)
+        loss, acc = model_bin.train_on_batch(batch_x, batch_y)
+        epoch_train_loss.append(loss)
+        epoch_train_acc.append(acc)
+    train_loss_bin.append(np.mean(epoch_train_loss))
+    train_acc_bin.append(np.mean(epoch_train_acc))
+    # 驗證
+    val_acc = []
+    val_loss = []
+    for step in range(steps_test_bin):
+        batch_x, batch_y = next(test_gen_bin)
+        batch_x = preprocess_batch(batch_x, adaptive_threshold)
+        loss, acc = model_bin.test_on_batch(batch_x, batch_y)
+        val_acc.append(acc)
+        val_loss.append(loss)
+    val_loss_bin.append(np.mean(val_loss))
+    val_acc_bin.append(np.mean(val_acc))
+    print(f"Validation accuracy: {np.mean(val_acc):.4f}")
+
+# 訓練尖銳化分類器
+for epoch in range(EPOCHS):
+    print(f"Epoch {epoch+1}/{EPOCHS} (Sharpen)")
+    epoch_train_loss = []
+    epoch_train_acc = []
+    for step in range(steps_train_sharp):
+        batch_x, batch_y = next(train_gen_sharp)
+        batch_x = preprocess_batch(batch_x, sharpen)
+        loss, acc = model_sharp.train_on_batch(batch_x, batch_y)
+        epoch_train_loss.append(loss)
+        epoch_train_acc.append(acc)
+    train_loss_sharp.append(np.mean(epoch_train_loss))
+    train_acc_sharp.append(np.mean(epoch_train_acc))
+    # 驗證
+    val_acc = []
+    val_loss = []
+    for step in range(steps_test_sharp):
+        batch_x, batch_y = next(test_gen_sharp)
+        batch_x = preprocess_batch(batch_x, sharpen)
+        loss, acc = model_sharp.test_on_batch(batch_x, batch_y)
+        val_acc.append(acc)
+        val_loss.append(loss)
+    val_loss_sharp.append(np.mean(val_loss))
+    val_acc_sharp.append(np.mean(val_acc))
+    print(f"Validation accuracy: {np.mean(val_acc):.4f}")
+
+# 儲存模型
+model_bin.save('model_bin.h5')
+model_sharp.save('model_sharp.h5')
+
+# 測試集評估
+test_gen_bin.reset()
+test_gen_sharp.reset()
+acc_bin = []
+for step in range(steps_test_bin):
+    batch_x, batch_y = next(test_gen_bin)
+    batch_x = preprocess_batch(batch_x, adaptive_threshold)
+    loss, acc = model_bin.test_on_batch(batch_x, batch_y)
+    acc_bin.append(acc)
+print(f"二值化分類器測試集準確率: {np.mean(acc_bin):.4f}")
+
+acc_sharp = []
+for step in range(steps_test_sharp):
+    batch_x, batch_y = next(test_gen_sharp)
+    batch_x = preprocess_batch(batch_x, sharpen)
+    loss, acc = model_sharp.test_on_batch(batch_x, batch_y)
+    acc_sharp.append(acc)
+print(f"尖銳化分類器測試集準確率: {np.mean(acc_sharp):.4f}")
+
+# 畫 loss 曲線
+plt.figure(figsize=(12,5))
+plt.subplot(2,2,1)
+plt.plot(train_loss_bin, label='Train Loss (Binary)')
+plt.plot(val_loss_bin, label='Valid Loss (Binary)')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Binary Classifier Loss')
+plt.legend()
+
+plt.subplot(2,2,2)
+plt.plot(train_loss_sharp, label='Train Loss (Sharpen)')
+plt.plot(val_loss_sharp, label='Valid Loss (Sharpen)')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Sharpen Classifier Loss')
+plt.legend()
+
+# 畫 accuracy 曲線
+plt.subplot(2,2,3)
+plt.plot(train_acc_bin, label='Train Acc (Binary)')
+plt.plot(val_acc_bin, label='Valid Acc (Binary)')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.title('Binary Classifier Accuracy')
+plt.legend()
+
+plt.subplot(2,2,4)
+plt.plot(train_acc_sharp, label='Train Acc (Sharpen)')
+plt.plot(val_acc_sharp, label='Valid Acc (Sharpen)')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.title('Sharpen Classifier Accuracy')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
